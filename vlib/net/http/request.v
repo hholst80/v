@@ -5,6 +5,7 @@ module http
 
 import io
 import net
+import net.http.chunked
 import net.urllib
 import rand
 import strings
@@ -223,16 +224,92 @@ fn (req &Request) http_do(host string, method Method, path string) !Response {
 	$if trace_http_request ? {
 		eprintln('> ${s}')
 	}
-	mut bytes := req.read_all_from_client_connection(client)!
+	mut buf_reader := io.new_buffered_reader(reader: client)
+	response := req.parse_response_reader(mut buf_reader)!
 	client.close()!
-	response_text := bytes.bytestr()
-	$if trace_http_response ? {
-		eprintln('< ${response_text}')
-	}
 	if req.on_finish != unsafe { nil } {
-		req.on_finish(req, u64(response_text.len))!
+		req.on_finish(req, u64(buf_reader.total_read))!
 	}
-	return parse_response(response_text)
+	return response
+}
+
+fn (req &Request) parse_response_reader(mut input io.BufferedReader) !Response {
+	mut sb := strings.new_builder(32768)
+	defer { unsafe{ sb.free() } }
+	first_line := input.read_line()!
+	version, status_code, status_msg := parse_status_line(first_line)!
+	sb.write_string(first_line)
+	sb.write_string("\r\n")
+	// parse_headers(string) supports the final empty line so include it in sb.
+	header_begin := sb.len
+	for {
+		line := input.read_line()!
+		sb.write_string(line)
+		sb.write_string("\r\n")
+		if line == "" { break }
+	}
+	header_end := sb.len
+	header := parse_headers(sb[header_begin..header_end].bytestr())!
+	content_length := header.get(.content_length) or { "-1" }.i64()
+	if content_length > 0 {
+		mut buf := []u8{len:32768}
+		mut readsum := 0
+		mut old_len := 0
+		for readsum < content_length {
+			// Running out of buffer before content_length has been read is an error
+			read := input.read(mut buf)!
+			readsum += read
+			sb.write(buf[..read])!
+			if req.on_progress != unsafe { nil } {
+				req.on_progress(req, sb[old_len..sb.len], u64(sb.len))!
+				old_len = sb.len
+			}
+		}
+		if old_len == 0 {
+			if req.on_progress != unsafe { nil } {
+				req.on_progress(req, sb[old_len..sb.len], u64(sb.len))!
+				old_len = sb.len
+			}
+		}
+	} else {
+		mut buf := []u8{len:32768}
+		mut old_len := 0
+		for {
+			read := input.read(mut buf) or {
+				if err is io.Eof {
+					break
+				}
+				return err
+			}
+			sb.write(buf[..read])!
+			if req.on_progress != unsafe { nil } {
+				req.on_progress(req, sb[old_len..sb.len], u64(sb.len))!
+				old_len = sb.len
+			}
+		}
+		if old_len == 0 {
+			if req.on_progress != unsafe { nil } {
+				req.on_progress(req, sb[old_len..sb.len], u64(sb.len))!
+				old_len = sb.len
+			}
+		}
+	}
+	mut body := sb[header_end..].bytestr()
+	// FIXME: This is not included in the current test suite.
+	// FIXME: Inline the chunk-unpacking in the body reader above.
+	if header.get(.transfer_encoding) or { '' } == 'chunked' {
+		body = chunked.decode(body)!
+	}
+	$if trace_http_response ? {
+		eprintln("< ${sb[..header_end]}\r\n${body}")
+	}
+	return Response{
+		http_version: version
+		status_code: status_code
+		status_msg: status_msg
+		header: header
+		body: body
+	}
 }
 
 fn (req &Request) read_all_from_client_connection(r &net.TcpConn) ![]u8 {
