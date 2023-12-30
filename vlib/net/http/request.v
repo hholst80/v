@@ -235,24 +235,28 @@ fn (req &Request) http_do(host string, method Method, path string) !Response {
 
 fn (req &Request) parse_response_reader(mut input io.BufferedReader) !Response {
 	mut sb := strings.new_builder(32768)
-	defer { unsafe{ sb.free() } }
+	defer {
+		unsafe { sb.free() }
+	}
 	first_line := input.read_line()!
 	version, status_code, status_msg := parse_status_line(first_line)!
 	sb.write_string(first_line)
-	sb.write_string("\r\n")
+	sb.write_string('\r\n')
 	// parse_headers(string) supports the final empty line so include it in sb.
 	header_begin := sb.len
 	for {
 		line := input.read_line()!
 		sb.write_string(line)
-		sb.write_string("\r\n")
-		if line == "" { break }
+		sb.write_string('\r\n')
+		if line == '' {
+			break
+		}
 	}
 	header_end := sb.len
 	header := parse_headers(sb[header_begin..header_end].bytestr())!
-	content_length := header.get(.content_length) or { "-1" }.i64()
+	content_length := header.get(.content_length) or { '-1' }.i64()
 	if content_length > 0 {
-		mut buf := []u8{len:32768}
+		mut buf := []u8{len: 32768}
 		mut readsum := 0
 		mut old_len := 0
 		for readsum < content_length {
@@ -272,7 +276,7 @@ fn (req &Request) parse_response_reader(mut input io.BufferedReader) !Response {
 			}
 		}
 	} else {
-		mut buf := []u8{len:32768}
+		mut buf := []u8{len: 32768}
 		mut old_len := 0
 		for {
 			read := input.read(mut buf) or {
@@ -301,7 +305,7 @@ fn (req &Request) parse_response_reader(mut input io.BufferedReader) !Response {
 		body = chunked.decode(body)!
 	}
 	$if trace_http_response ? {
-		eprintln("< ${sb[..header_end]}\r\n${body}")
+		eprintln('< ${sb[..header_end]}\r\n${body}')
 	}
 	return Response{
 		http_version: version
